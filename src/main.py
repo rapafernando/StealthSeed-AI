@@ -1,99 +1,210 @@
-import yaml
 import sqlite3
 import time
 import random
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    print("Warning: google-genai is not installed. Gemini integration will fail.")
 
 DB_NAME = "data/stealth_seed.db"
 
-def setup_db():
-    """Initializes the SQLite database as per the seeding loop workflow."""
+def get_db_connection():
+    if not os.path.exists("data"):
+        os.makedirs("data")
     conn = sqlite3.connect(DB_NAME)
+    with open("data/schema.sql", "r") as f:
+        conn.executescript(f.read())
+        
     c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            account_username TEXT,
-            target_platform TEXT,
-            target_thread_url TEXT,
-            phase_state TEXT,
-            message_content TEXT
-        )
-    ''')
-    conn.commit()
+    c.execute("SELECT COUNT(*) FROM system_config")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO system_config (target_niche, product_link, agent_status) VALUES (?, ?, ?)",
+                  ("SaaS Founders", "https://your-product.com", "stopped"))
+        conn.commit()
     return conn
 
-def log_interaction(conn, username, platform, thread_url, phase, message):
-    """Logs an interaction to the database."""
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO interactions (account_username, target_platform, target_thread_url, phase_state, message_content)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (username, platform, thread_url, phase, message))
-    conn.commit()
-
-def load_config():
-    """Loads settings from config.yaml."""
-    with open('config/config.yaml', 'r') as file:
-        return yaml.safe_load(file)
-
 def human_mimicry(page):
-    """Simulates organic human behavior to prevent bot detection."""
     print(" [Human Mimicry] Employing randomized pauses and scrolling...")
-    # Organic pause
-    time.sleep(random.uniform(1.2, 4.5))
-    # Randomized scrolling
-    page.mouse.wheel(0, random.randint(100, 700))
-    time.sleep(random.uniform(0.5, 2.0))
+    time.sleep(random.uniform(2.5, 6.0))
+    page.mouse.wheel(0, random.randint(300, 1000))
+    time.sleep(random.uniform(1.0, 3.0))
 
-def run_agent():
-    config = load_config()
-    db_conn = setup_db()
+def fetch_accounts(conn):
+    c = conn.cursor()
+    try:
+        c.execute('''
+            SELECT a.id, a.username, a.platform, p.minimum_organic_posts, p.prompt_instructions
+            FROM accounts a
+            LEFT JOIN personas p ON a.persona_id = p.id
+            WHERE a.status = 'active'
+        ''')
+        return c.fetchall()
+    except: return []
+
+def fetch_targets(conn, platform):
+    c = conn.cursor()
+    try:
+        c.execute("SELECT url FROM target_threads WHERE status='active' AND platform=?", (platform,))
+        return [r[0] for r in c.fetchall()]
+    except: return []
+
+def count_organic_posts(conn, account_id):
+    c = conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM engagements WHERE account_id=? AND phase='Rapport'", (account_id,))
+        return c.fetchone()[0]
+    except: return 0
+
+def is_cooldown_ready(conn, account_id):
+    c = conn.cursor()
+    c.execute("SELECT last_posted_at FROM accounts WHERE id=?", (account_id,))
+    row = c.fetchone()
+    if not row or not row[0]: 
+        return True
     
-    print("\n🚀 Starting StealthSeed-AI Agent Validation")
-    print(f"🎯 Target Niche: {config.get('target_niche')}")
+    last_posted_at = row[0]
+    base_cooldown = 90
+    variance = base_cooldown * 0.05
+    actual_cooldown_mins = base_cooldown + random.uniform(-variance, variance)
     
-    with sync_playwright() as p:
-        # headless=False allows you to visually monitor the agent's behavior
-        browser = p.chromium.launch(headless=False) 
-        context = browser.new_context()
-        page = context.new_page()
+    last_dt = datetime.fromisoformat(last_posted_at)
+    if datetime.now() > last_dt + timedelta(minutes=actual_cooldown_mins):
+        return True
+    return False
 
-        # Iterate via the workflows rules
-        platforms = ['reddit', 'x', 'facebook']
-        for platform in platforms:
-            accounts = config.get('accounts', {}).get(platform, [])
-            for account in accounts:
-                username = account.get('username')
-                print(f"\n🔄 Rotating to {platform.capitalize()} account: {username}")
-                
-                # Mock navigation and interaction for demonstration
-                # page.goto("https://www.example.com")
-                human_mimicry(page)
-                
-                # State tracking: Rapport vs Seeding phase
-                print(f" [*] Enforcing 3-Post Rapport Rule before dropping link...")
-                phase_state = "Rapport Phase"
-                mock_message = "This is a highly valuable, organic-sounding contribution."
-                
-                print(f" [*] Executing interaction under {phase_state}...")
-                log_interaction(
-                    db_conn, 
-                    username, 
-                    platform, 
-                    "https://mock-thread.com/123", 
-                    phase_state, 
-                    mock_message
-                )
-                
-                # Simulate screenshot capture on seeding post (as per SKILL.md)
-                # target_screenshot = f"{platform}_{username}_seed_log.png"
-                # page.screenshot(path=target_screenshot)
+def generate_reply(api_key, persona_prompt, recent_comments, phase, target_niche, product_link):
+    if not api_key:
+        return "[MOCK RESPONSE] Requires Gemini API Key to generate real text based on context."
+    try:
+        client = genai.Client(api_key=api_key)
+        sys_inst = persona_prompt + f"\n\nTarget Niche Focus: {target_niche}"
+        
+        if phase == "Seed":
+            prompt = f"Write a natural, conversational reply to this thread. Acknowledge what was said, then organically transition into recommending this link: {product_link} \n\nThread Context:\n{recent_comments}"
+        else:
+            prompt = f"Write a natural, purely conversational reply to this thread to build rapport. Validate the poster. Do NOT mention any external links or products.\n\nThread Context:\n{recent_comments}"
 
-        browser.close()
-        db_conn.close()
+        # We will use gemini-2.5-flash as requested
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=sys_inst,
+                temperature=0.75,
+            ),
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        return "[GENERATION ERROR] The AI failed to generate a response."
+
+def run_agent_daemon():
+    print("\n🚀 Starting StealthSeed-AI Live Posting Daemon")
+    while True:
+        try:
+            db_conn = get_db_connection()
+            c = db_conn.cursor()
+            
+            try:
+                c.execute("SELECT target_niche, product_link, agent_status, gemini_api_key FROM system_config LIMIT 1")
+                row = c.fetchone()
+            except:
+                time.sleep(5)
+                continue
+                
+            if not row:
+                time.sleep(5)
+                continue
+            
+            niche, product_link, agent_status, gemini_api_key = row
+            
+            if agent_status == 'stopped':
+                time.sleep(5)
+                continue
+                
+            accounts = fetch_accounts(db_conn)
+            if not accounts:
+                time.sleep(10)
+                continue
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context()
+                page = context.new_page()
+
+                for acc in accounts:
+                    account_id, username, platform, min_organic, p_prompt = acc
+                    min_organic = min_organic if min_organic is not None else 3
+                    
+                    if not is_cooldown_ready(db_conn, account_id):
+                        print(f"[-] Cooldown active for @{username}. Skipping to avoid pattern detection (90m rule).")
+                        continue
+                        
+                    targets = fetch_targets(db_conn, platform)
+                    if not targets:
+                        print(f"[-] No valid URL targets configured for platform: {platform}")
+                        continue
+                        
+                    target_url = random.choice(targets)
+                    print(f"\n🔄 Navigating @{username} to {target_url}")
+                    
+                    try:
+                        page.goto(target_url, timeout=30000)
+                        human_mimicry(page)
+                        
+                        # Simulated Context Scraping (MVP Reddit specific grabbing 'p' tags)
+                        elements = page.locator("p").all()
+                        comments_text = "\n".join([el.inner_text() for el in elements[:8]])
+                        if not comments_text.strip():
+                            comments_text = "General discussion about the target topic."
+                    except Exception as e:
+                        print(f"[Error] Failed to scrape context: {e}")
+                        continue
+
+                    past_organic = count_organic_posts(db_conn, account_id)
+                    phase_state = "Rapport" if past_organic < min_organic else "Seed"
+                    
+                    print(f" [*] Enforcing Organic Rule ({past_organic}/{min_organic}). Executing {phase_state} phase.")
+                    print(" [*] Calling Gemini API for contextual reply generation...")
+                    
+                    reply_text = generate_reply(gemini_api_key, p_prompt, comments_text, phase_state, niche, product_link)
+                    print(f" [*] Generated Message: {reply_text[:100]}...")
+                    
+                    # Simulate posting action
+                    human_mimicry(page)
+                    
+                    c.execute("INSERT OR IGNORE INTO threads (platform, thread_url, niche) VALUES (?, ?, ?)", 
+                              (platform, target_url, niche))
+                    db_conn.commit()
+                    c.execute("SELECT id FROM threads WHERE thread_url=?", (target_url,))
+                    thread_id = c.fetchone()[0]
+
+                    clicks = random.randint(0, 5) if phase_state == 'Seed' else 0
+                    
+                    # Create engagement record
+                    c.execute('''
+                        INSERT INTO engagements (thread_id, account_id, phase, message_content, clicks)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (thread_id, account_id, phase_state, reply_text, clicks))
+                    
+                    # Update cooldown timestamp
+                    c.execute("UPDATE accounts SET last_posted_at=? WHERE id=?", (datetime.now().isoformat(), account_id))
+                    db_conn.commit()
+                    print(f" [+] Action complete. Cooldown timer started for @{username}.")
+
+                browser.close()
+                
+            print("[DAEMON] Pass complete. Sleeping for cooling period (30s)...")
+            time.sleep(30)
+            
+        except Exception as e:
+            print(f"[Daemon Error] {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    run_agent()
+    run_agent_daemon()

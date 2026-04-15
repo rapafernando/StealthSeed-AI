@@ -1,8 +1,25 @@
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS personas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    prompt_instructions TEXT,
+    minimum_organic_posts INTEGER DEFAULT 3
+);
+
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL,
+    password TEXT,
     platform TEXT NOT NULL,
-    status TEXT DEFAULT 'active'
+    persona_id INTEGER,
+    status TEXT DEFAULT 'active',
+    last_posted_at DATETIME,
+    FOREIGN KEY(persona_id) REFERENCES personas(id)
 );
 
 CREATE TABLE IF NOT EXISTS threads (
@@ -42,3 +59,19 @@ SELECT
 FROM engagements e
 JOIN accounts a ON e.account_id = a.id
 GROUP BY e.account_id;
+
+CREATE TABLE IF NOT EXISTS system_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_niche TEXT,
+    product_link TEXT,
+    gemini_api_key TEXT,
+    agent_status TEXT DEFAULT 'stopped'
+);
+
+CREATE TABLE IF NOT EXISTS target_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL UNIQUE,
+    platform TEXT,
+    niche TEXT,
+    status TEXT DEFAULT 'active'
+);
