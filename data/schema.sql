@@ -68,10 +68,9 @@ CREATE TABLE IF NOT EXISTS system_config (
     agent_status TEXT DEFAULT 'stopped'
 );
 
-CREATE TABLE IF NOT EXISTS target_threads (
+CREATE TABLE IF NOT EXISTS search_tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    url TEXT NOT NULL UNIQUE,
+    tag TEXT NOT NULL UNIQUE,
     platform TEXT,
-    niche TEXT,
     status TEXT DEFAULT 'active'
 );

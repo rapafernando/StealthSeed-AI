@@ -2,6 +2,7 @@ import sqlite3
 import time
 import random
 import os
+import urllib.parse
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
@@ -46,12 +47,21 @@ def fetch_accounts(conn):
         return c.fetchall()
     except: return []
 
-def fetch_targets(conn, platform):
+def fetch_search_tags(conn, platform):
     c = conn.cursor()
     try:
-        c.execute("SELECT url FROM target_threads WHERE status='active' AND platform=?", (platform,))
+        c.execute("SELECT tag FROM search_tags WHERE status='active' AND platform=?", (platform,))
         return [r[0] for r in c.fetchall()]
     except: return []
+
+def has_account_posted_in_thread(conn, account_id, thread_url):
+    c = conn.cursor()
+    c.execute('''
+        SELECT COUNT(*) FROM engagements e 
+        JOIN threads t ON e.thread_id = t.id 
+        WHERE t.thread_url = ? AND e.account_id = ?
+    ''', (thread_url, account_id))
+    return c.fetchone()[0] > 0
 
 def count_organic_posts(conn, account_id):
     c = conn.cursor()
@@ -145,25 +155,57 @@ def run_agent_daemon():
                         print(f"[-] Cooldown active for @{username}. Skipping to avoid pattern detection (90m rule).")
                         continue
                         
-                    targets = fetch_targets(db_conn, platform)
-                    if not targets:
-                        print(f"[-] No valid URL targets configured for platform: {platform}")
+                    tags = fetch_search_tags(db_conn, platform)
+                    if not tags:
+                        print(f"[-] No valid search tags configured for platform: {platform}")
                         continue
                         
-                    target_url = random.choice(targets)
-                    print(f"\n🔄 Navigating @{username} to {target_url}")
+                    target_tag = random.choice(tags)
+                    print(f"\n🔍 [Discovery Phase] Searching {platform} for tag: '{target_tag}'")
                     
                     try:
+                        search_url = f"https://www.reddit.com/search/?q={urllib.parse.quote(target_tag)}&sort=new"
+                        page.goto(search_url, timeout=30000)
+                        human_mimicry(page)
+                        
+                        links = page.locator("a").all()
+                        found_urls = []
+                        for l in links:
+                            href = l.get_attribute("href")
+                            if href and "/comments/" in href:
+                                if "reddit.com" not in href:
+                                    found_urls.append(f"https://www.reddit.com{href}")
+                                else:
+                                    found_urls.append(href)
+                                    
+                        found_urls = list(dict.fromkeys(found_urls))
+                        
+                        if not found_urls:
+                            print(f" [-] No viable threads found for tag '{target_tag}'. Skipping pass.")
+                            continue
+                            
+                        target_url = None
+                        for url in found_urls:
+                            if not has_account_posted_in_thread(db_conn, account_id, url):
+                                target_url = url
+                                break
+                                
+                        if not target_url:
+                            print(f" [-] Exhausted all discovered threads for '{target_tag}'. Already engaged in them.")
+                            continue
+
+                        print(f" [+] Found fresh thread -> {target_url}")
+                        
                         page.goto(target_url, timeout=30000)
                         human_mimicry(page)
                         
-                        # Simulated Context Scraping (MVP Reddit specific grabbing 'p' tags)
                         elements = page.locator("p").all()
                         comments_text = "\n".join([el.inner_text() for el in elements[:8]])
                         if not comments_text.strip():
                             comments_text = "General discussion about the target topic."
+                            
                     except Exception as e:
-                        print(f"[Error] Failed to scrape context: {e}")
+                        print(f"[Error] Failed to scrape context during discovery: {e}")
                         continue
 
                     past_organic = count_organic_posts(db_conn, account_id)

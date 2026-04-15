@@ -86,8 +86,8 @@ if st.button("Logout"):
     st.session_state.logged_in = False
     st.rerun()
 
-tab_feed, tab_map, tab_personas, tab_accounts, tab_targets, tab_config, tab_override, tab_saas = st.tabs([
-    "💬 Live Feed", "🗺️ Mission Map", "🎭 Personas", "📱 SM Accounts", "🎯 Targets", "⚙️ Settings & Launch", "⚠️ Manual Override", "💼 SaaS Simulation"
+tab_feed, tab_map, tab_personas, tab_accounts, tab_tags, tab_config, tab_override, tab_saas = st.tabs([
+    "💬 Live Feed", "🗺️ Mission Map", "🎭 Personas", "📱 SM Accounts", "🎯 Discovery Tags", "⚙️ Settings & Launch", "⚠️ Manual Override", "💼 SaaS Simulation"
 ])
 
 with tab_feed:
@@ -207,31 +207,31 @@ with tab_accounts:
         pass
     conn.close()
 
-with tab_targets:
-    st.header("🎯 Target Threads")
-    st.write("Specific URLs for the agent to actively engage on.")
+with tab_tags:
+    st.header("🎯 Discovery Tags")
+    st.write("Keywords the AI will use to search the platform and harvest viable threads dynamically.")
     
-    with st.form("target_form"):
-        target_url = st.text_input("Thread URL (e.g. Reddit comment section)")
+    with st.form("tag_form"):
+        search_tag = st.text_input("Search Tag (e.g. 'keto vs paleo', 'desk job fitness')")
         t_platform = st.selectbox("Platform", ["reddit", "x", "facebook"])
-        if st.form_submit_button("Add Target"):
-            if target_url:
+        if st.form_submit_button("Add Tag"):
+            if search_tag:
                 conn = get_db_connection()
                 try:
-                    conn.execute("INSERT INTO target_threads (url, platform) VALUES (?, ?)", (target_url, t_platform))
+                    conn.execute("INSERT INTO search_tags (tag, platform) VALUES (?, ?)", (search_tag.strip(), t_platform))
                     conn.commit()
-                    st.success("Target added successfully!")
+                    st.success("Tag added successfully!")
                 except sqlite3.IntegrityError:
-                    st.error("Target already exists.")
+                    st.error("Tag already exists.")
                 conn.close()
     
     conn = get_db_connection()
     try:
-        df_targets = pd.read_sql_query("SELECT id, url, platform, status FROM target_threads", conn)
-        if not df_targets.empty:
-            st.dataframe(df_targets, use_container_width=True)
+        df_tags = pd.read_sql_query("SELECT id, tag, platform, status FROM search_tags", conn)
+        if not df_tags.empty:
+            st.dataframe(df_tags, use_container_width=True)
         else:
-            st.info("No targets configured.")
+            st.info("No tags configured. Add some tags for the agent to start hunting!")
     except Exception as e:
         pass
     conn.close()
