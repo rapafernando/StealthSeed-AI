@@ -10,7 +10,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     command: >
-      bash -c "pip install playwright pyyaml google-genai && playwright install --with-deps chromium && python src/main.py"
+      bash -c "pip install playwright playwright-stealth pyyaml google-genai && playwright install --with-deps chromium && python src/main.py"
 
   dashboard:
     image: python:3.11-slim

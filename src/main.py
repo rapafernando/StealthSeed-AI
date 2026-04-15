@@ -7,6 +7,11 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 try:
+    from playwright_stealth import stealth_sync
+except ImportError:
+    pass
+
+try:
     from google import genai
     from google.genai import types
 except ImportError:
@@ -35,11 +40,43 @@ def human_mimicry(page):
     page.mouse.wheel(0, random.randint(300, 1000))
     time.sleep(random.uniform(1.0, 3.0))
 
+def perform_human_login(page, username, password):
+    if not username or not password:
+        return
+    print(f" [Login Phase] Simulating human login for @{username}...")
+    try:
+        page.goto("https://www.reddit.com/login", timeout=45000)
+    except: pass
+    human_mimicry(page)
+
+    try:
+        user_input = page.locator('input[name="username"], input#loginUsername')
+        if not user_input.is_visible(timeout=5000):
+            print(" [Login Phase] Login elements not visible. Skipping or already logged in.")
+            return
+
+        user_input.click()
+        page.keyboard.type(username, delay=random.randint(50, 200))
+        time.sleep(random.uniform(1.0, 2.5))
+        
+        pass_input = page.locator('input[name="password"], input#loginPassword')
+        pass_input.click()
+        page.keyboard.type(password, delay=random.randint(50, 200))
+        time.sleep(random.uniform(1.0, 2.0))
+        
+        page.keyboard.press("Enter")
+        try: page.wait_for_load_state("networkidle", timeout=15000)
+        except: pass
+        print(" [Login Phase] Authentication form submitted.")
+        human_mimicry(page)
+    except Exception as e:
+        print(f" [Login Error] Could not complete login natively: {e}")
+
 def fetch_accounts(conn):
     c = conn.cursor()
     try:
         c.execute('''
-            SELECT a.id, a.username, a.platform, p.minimum_organic_posts, p.prompt_instructions
+            SELECT a.id, a.username, a.password, a.platform, p.minimum_organic_posts, p.prompt_instructions
             FROM accounts a
             LEFT JOIN personas p ON a.persona_id = p.id
             WHERE a.status = 'active'
@@ -98,7 +135,6 @@ def generate_reply(api_key, persona_prompt, recent_comments, phase, target_niche
         else:
             prompt = f"Write a natural, purely conversational reply to this thread to build rapport. Validate the poster. Do NOT mention any external links or products.\n\nThread Context:\n{recent_comments}"
 
-        # We will use gemini-2.5-flash as requested
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
@@ -143,12 +179,10 @@ def run_agent_daemon():
                 continue
             
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context()
-                page = context.new_page()
+                browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
 
                 for acc in accounts:
-                    account_id, username, platform, min_organic, p_prompt = acc
+                    account_id, username, password, platform, min_organic, p_prompt = acc
                     min_organic = min_organic if min_organic is not None else 3
                     
                     if not is_cooldown_ready(db_conn, account_id, cooldown_val):
@@ -160,28 +194,50 @@ def run_agent_daemon():
                         print(f"[-] No valid search tags configured for platform: {platform}")
                         continue
                         
+                    # Create isolated context for this account's session
+                    context = browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        viewport={'width': 1920, 'height': 1080}
+                    )
+                    page = context.new_page()
+                    
+                    try:
+                        stealth_sync(page)
+                    except: pass
+                    
+                    if platform.lower() == "reddit":
+                        perform_human_login(page, username, password)
+                        
                     target_tag = random.choice(tags)
                     print(f"\n🔍 [Discovery Phase] Searching {platform} for tag: '{target_tag}'")
                     
                     try:
+                        found_urls = []
                         search_url = f"https://www.reddit.com/search/?q={urllib.parse.quote(target_tag)}&sort=new"
-                        page.goto(search_url, timeout=30000)
+                        print(f" [Discovery Phase] Navigating directly to ui search: {search_url}")
+                        try:
+                            page.goto(search_url, timeout=30000)
+                            page.wait_for_load_state("networkidle", timeout=5000)
+                        except: pass
                         human_mimicry(page)
                         
+                        try: page.wait_for_selector('a[href*="/comments/"]', timeout=5000)
+                        except: pass
+                        
                         links = page.locator("a").all()
-                        found_urls = []
                         for l in links:
                             href = l.get_attribute("href")
                             if href and "/comments/" in href:
-                                if "reddit.com" not in href:
+                                if "www.reddit.com" not in href:
                                     found_urls.append(f"https://www.reddit.com{href}")
                                 else:
                                     found_urls.append(href)
-                                    
+                                        
                         found_urls = list(dict.fromkeys(found_urls))
                         
                         if not found_urls:
                             print(f" [-] No viable threads found for tag '{target_tag}'. Skipping pass.")
+                            context.close()
                             continue
                             
                         target_url = None
@@ -192,6 +248,7 @@ def run_agent_daemon():
                                 
                         if not target_url:
                             print(f" [-] Exhausted all discovered threads for '{target_tag}'. Already engaged in them.")
+                            context.close()
                             continue
 
                         print(f" [+] Found fresh thread -> {target_url}")
@@ -206,6 +263,7 @@ def run_agent_daemon():
                             
                     except Exception as e:
                         print(f"[Error] Failed to scrape context during discovery: {e}")
+                        context.close()
                         continue
 
                     past_organic = count_organic_posts(db_conn, account_id)
@@ -217,8 +275,31 @@ def run_agent_daemon():
                     reply_text = generate_reply(gemini_api_key, p_prompt, comments_text, phase_state, niche, product_link)
                     print(f" [*] Generated Message: {reply_text[:100]}...")
                     
-                    # Simulate posting action
+                    # Native human posting execution
+                    print(" [*] Initiating human typing pattern for reply...")
+                    try:
+                        # Attempt to find common reddit reply paths
+                        reply_button = page.locator('button:has-text("Reply"), shreddit-composer').first
+                        if reply_button:
+                            reply_button.click()
+                            time.sleep(random.uniform(1.0, 2.0))
+                            
+                            textarea = page.locator('div[contenteditable="true"], textarea').first
+                            if textarea:
+                                textarea.click()
+                                page.keyboard.type(reply_text, delay=random.randint(20, 80))
+                                time.sleep(random.uniform(1.5, 3.0))
+                                
+                                submit_button = page.locator('button:has-text("Comment"), button[type="submit"]').first
+                                if submit_button:
+                                    submit_button.click()
+                                    time.sleep(random.uniform(3.0, 5.0))
+                                    print(" [+] Post submitted natively.")
+                    except Exception as e:
+                        print(f" [Automation Error] Could not simulate click/type natively: {e}")
+                    
                     human_mimicry(page)
+                    context.close()
                     
                     c.execute("INSERT OR IGNORE INTO threads (platform, thread_url, niche) VALUES (?, ?, ?)", 
                               (platform, target_url, niche))
@@ -228,13 +309,11 @@ def run_agent_daemon():
 
                     clicks = random.randint(0, 5) if phase_state == 'Seed' else 0
                     
-                    # Create engagement record
                     c.execute('''
                         INSERT INTO engagements (thread_id, account_id, phase, message_content, clicks)
                         VALUES (?, ?, ?, ?, ?)
                     ''', (thread_id, account_id, phase_state, reply_text, clicks))
                     
-                    # Update cooldown timestamp
                     c.execute("UPDATE accounts SET last_posted_at=? WHERE id=?", (datetime.now().isoformat(), account_id))
                     db_conn.commit()
                     print(f" [+] Action complete. Cooldown timer started for @{username}.")
