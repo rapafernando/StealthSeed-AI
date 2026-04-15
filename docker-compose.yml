@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  agent-runner:
+    image: python:3.11-slim
+    container_name: agent_runner
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      bash -c "pip install playwright pyyaml && playwright install --with-deps chromium && python src/main.py"
+
+  dashboard:
+    image: python:3.11-slim
+    container_name: stealthseed_dashboard
+    working_dir: /app/dashboard
+    volumes:
+      - ./:/app
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      bash -c "pip install streamlit pandas && streamlit run app.py --server.port=8501 --server.address=0.0.0.0"

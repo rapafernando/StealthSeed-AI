@@ -1,0 +1,15 @@
+# StealthSeed-AI Global Configuration
+
+target_niche: "YOUR_NICHE_HERE"
+product_link: "YOUR_PRODUCT_LINK_HERE"
+
+accounts:
+  reddit:
+    - username: "YOUR_REDDIT_USERNAME"
+      password: "YOUR_REDDIT_PASSWORD"
+  x:
+    - username: "YOUR_X_USERNAME"
+      password: "YOUR_X_PASSWORD"
+  facebook:
+    - username: "YOUR_FACEBOOK_USERNAME"
+      password: "YOUR_FACEBOOK_PASSWORD"
