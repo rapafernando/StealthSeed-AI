@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS system_config (
     target_niche TEXT,
     product_link TEXT,
     gemini_api_key TEXT,
+    cooldown_minutes INTEGER DEFAULT 90,
     agent_status TEXT DEFAULT 'stopped'
 );
 

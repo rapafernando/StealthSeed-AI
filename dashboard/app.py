@@ -3,32 +3,28 @@ import sqlite3
 import pandas as pd
 import hashlib
 import os
+import time
 
 DB_PATH = "../data/stealth_seed.db"
 
 def init_db():
-    # Make sure data directory exists
     os.makedirs("../data", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     try:
         with open("../data/schema.sql", "r") as f:
             conn.executescript(f.read())
             
-        # Ensure at least 1 config row exists
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM system_config")
         if c.fetchone()[0] == 0:
             c.execute("INSERT INTO system_config (target_niche, product_link, agent_status) VALUES (?, ?, ?)",
                       ("SaaS Founders", "https://your-product.com", "stopped"))
             
-        try:
-            conn.execute("ALTER TABLE accounts ADD COLUMN last_posted_at DATETIME")
-            conn.commit()
+        try: conn.execute("ALTER TABLE accounts ADD COLUMN last_posted_at DATETIME"); conn.commit()
         except: pass
-        
-        try:
-            conn.execute("ALTER TABLE system_config ADD COLUMN gemini_api_key TEXT")
-            conn.commit()
+        try: conn.execute("ALTER TABLE system_config ADD COLUMN gemini_api_key TEXT"); conn.commit()
+        except: pass
+        try: conn.execute("ALTER TABLE system_config ADD COLUMN cooldown_minutes INTEGER DEFAULT 90"); conn.commit()
         except: pass
         
     except Exception as e:
@@ -45,9 +41,49 @@ def get_db_connection():
 def make_hash(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
-st.set_page_config(page_title="StealthSeed-AI Dashboard", layout="wide")
+st.set_page_config(page_title="StealthSeed-AI Dashboard", layout="wide", initial_sidebar_state="collapsed")
 
-# Init DB automatically
+# Inject Custom CSS for Premium UX Overlay
+CUSTOM_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+html, body, [class*="css"]  {
+    font-family: 'Inter', sans-serif !important;
+}
+.stApp {
+    background: linear-gradient(180deg, #0f111a 0%, #06080f 100%);
+    color: #e2e8f0;
+}
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px;
+}
+.stTabs [data-baseweb="tab"] {
+    background-color: #1e293b;
+    border-radius: 8px 8px 0px 0px;
+    padding: 10px 20px;
+    border: 1px solid #334155;
+    border-bottom: none;
+}
+.stTabs [aria-selected="true"] {
+    background-color: #3b82f6 !important;
+    color: #ffffff !important;
+}
+div[data-testid="stMetricValue"] {
+    color: #38bdf8 !important;
+}
+.stButton>button {
+    border-radius: 8px;
+    font-weight: 600;
+    transition: all 0.2s ease-in-out;
+}
+.stButton>button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.4);
+}
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
 init_db()
 
 if "logged_in" not in st.session_state:
@@ -80,11 +116,32 @@ if not st.session_state.logged_in:
         conn.close()
     st.stop()
 
-st.title(f"🌱 StealthSeed-AI Command Center - Welcome {st.session_state.username}")
+# Build Header with inline logout
+col_h1, col_h2 = st.columns([0.9, 0.1])
+col_h1.title(f"🌱 StealthSeed-AI Dashboard")
+with col_h2:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state.logged_in = False
+        st.rerun()
 
-if st.button("Logout"):
-    st.session_state.logged_in = False
-    st.rerun()
+conn = get_db_connection()
+try:
+    df_p = pd.read_sql_query("SELECT name FROM personas", conn)
+    persona_opts = ["All"] + df_p['name'].tolist() if not df_p.empty else ["All"]
+    df_a = pd.read_sql_query("SELECT username FROM accounts", conn)
+    acc_opts = ["All"] + df_a['username'].tolist() if not df_a.empty else ["All"]
+except:
+    persona_opts, acc_opts = ["All"], ["All"]
+conn.close()
+
+# Contextual Filters embedded inside the expander
+with st.expander("🔍 Expand Global Mission Filters", expanded=False):
+    c_f1, c_f2, c_f3, c_f4 = st.columns(4)
+    f_persona = c_f1.selectbox("Filter by Persona", persona_opts)
+    f_account = c_f2.selectbox("Filter by SM Account", acc_opts)
+    f_platform = c_f3.selectbox("Filter by Platform", ["All", "reddit", "x", "facebook"])
+    f_date = c_f4.date_input("Filter by Date (On or After)", value=None)
 
 tab_feed, tab_map, tab_personas, tab_accounts, tab_tags, tab_config, tab_override, tab_saas = st.tabs([
     "💬 Live Feed", "🗺️ Mission Map", "🎭 Personas", "📱 SM Accounts", "🎯 Discovery Tags", "⚙️ Settings & Launch", "⚠️ Manual Override", "💼 SaaS Simulation"
@@ -97,17 +154,28 @@ with tab_feed:
     conn = get_db_connection()
     try:
         query = """
-            SELECT t.platform, t.thread_url, e.phase, e.timestamp, a.username, e.message_content 
+            SELECT t.platform, t.thread_url, e.phase, e.timestamp, a.username, e.message_content, p.name as persona_name 
             FROM engagements e
             JOIN threads t ON e.thread_id = t.id
             JOIN accounts a ON e.account_id = a.id
+            LEFT JOIN personas p ON a.persona_id = p.id
             ORDER BY e.timestamp DESC
-            LIMIT 50
+            LIMIT 200
         """
-        rows = conn.execute(query).fetchall()
+        df_feed = pd.read_sql_query(query, conn)
+        
+        if not df_feed.empty:
+            if f_persona != "All": df_feed = df_feed[df_feed['persona_name'] == f_persona]
+            if f_account != "All": df_feed = df_feed[df_feed['username'] == f_account]
+            if f_platform != "All": df_feed = df_feed[df_feed['platform'] == f_platform]
+            if f_date:
+                df_feed['date_only'] = pd.to_datetime(df_feed['timestamp']).dt.date
+                df_feed = df_feed[df_feed['date_only'] >= f_date]
+        
+        rows = df_feed.to_dict('records')
         
         if not rows:
-            st.info("No active missions found. Set up your Agent in 'Settings & Launch'!")
+            st.info("No active missions match your filters!")
         else:
             for row in rows:
                 with st.container():
@@ -130,15 +198,27 @@ with tab_map:
     conn = get_db_connection()
     try:
         query = """
-            SELECT t.platform, t.thread_url, e.phase, e.timestamp, a.username 
+            SELECT t.platform, t.thread_url, e.phase, e.timestamp, a.username, p.name as persona_name 
             FROM engagements e
             JOIN threads t ON e.thread_id = t.id
             JOIN accounts a ON e.account_id = a.id
+            LEFT JOIN personas p ON a.persona_id = p.id
             ORDER BY e.timestamp DESC
         """
         df = pd.read_sql_query(query, conn)
         if not df.empty:
-            st.dataframe(df, use_container_width=True)
+            if f_persona != "All": df = df[df['persona_name'] == f_persona]
+            if f_account != "All": df = df[df['username'] == f_account]
+            if f_platform != "All": df = df[df['platform'] == f_platform]
+            if f_date:
+                df['date_only'] = pd.to_datetime(df['timestamp']).dt.date
+                df = df[df['date_only'] >= f_date]
+                df = df.drop(columns=['date_only'])
+            
+            if df.empty:
+                st.info("No active missions match your filters.")
+            else:
+                st.dataframe(df, use_container_width=True)
         else:
             st.info("No active missions found. Set up your Agent in 'Settings & Launch'!")
     except Exception as e:
@@ -162,6 +242,8 @@ with tab_personas:
                 conn.commit()
                 conn.close()
                 st.success(f"Persona '{p_name}' saved!")
+                time.sleep(1)
+                st.rerun()
             else:
                 st.error("Persona name is required.")
             
@@ -169,7 +251,25 @@ with tab_personas:
     conn = get_db_connection()
     df_p = pd.read_sql_query("SELECT id, name, minimum_organic_posts, prompt_instructions FROM personas", conn)
     conn.close()
-    st.dataframe(df_p, use_container_width=True)
+    if not df_p.empty:
+        st.dataframe(df_p, use_container_width=True)
+        
+        st.divider()
+        st.subheader("🛠️ Action Zone (Personas)")
+        with st.expander("Modify or Delete Persona"):
+            p_opts = {row['name']: row['id'] for idx, row in df_p.iterrows()}
+            selected_p = st.selectbox("Select Persona", list(p_opts.keys()))
+            if st.button("🗑️ Delete Selected Persona", type="primary"):
+                conn = get_db_connection()
+                try:
+                    conn.execute("DELETE FROM personas WHERE id=?", (p_opts[selected_p],))
+                    conn.commit()
+                    st.success("Deleted!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Cannot delete, it may be bound to an Account: {e}")
+                conn.close()
 
 with tab_accounts:
     st.header("📱 Manage SM Accounts")
@@ -183,17 +283,16 @@ with tab_accounts:
             platform = st.selectbox("Platform", ["reddit", "x", "facebook"])
             acc_user = st.text_input("Account Username")
             acc_pass = st.text_input("Account Password", type="password")
-            
             persona_options = {p['name']: p['id'] for p in personas}
             selected_p = st.selectbox("Assign Persona", list(persona_options.keys()))
             
             if st.form_submit_button("Add Account"):
-                conn.execute(
-                    "INSERT INTO accounts (username, password, platform, persona_id) VALUES (?, ?, ?, ?)",
-                    (acc_user, acc_pass, platform, persona_options[selected_p])
-                )
+                conn.execute("INSERT INTO accounts (username, password, platform, persona_id) VALUES (?, ?, ?, ?)",
+                    (acc_user, acc_pass, platform, persona_options[selected_p]))
                 conn.commit()
                 st.success("Account added!")
+                time.sleep(1)
+                st.rerun()
                 
     st.subheader("Active Accounts")
     try:
@@ -203,6 +302,23 @@ with tab_accounts:
             LEFT JOIN personas p ON a.persona_id = p.id
         """, conn)
         st.dataframe(df_a, use_container_width=True)
+        
+        if not df_a.empty:
+            st.divider()
+            st.subheader("🛠️ Action Zone (Accounts)")
+            with st.expander("Modify or Delete SM Account"):
+                a_opts = {row['username']: row['id'] for idx, row in df_a.iterrows()}
+                selected_a = st.selectbox("Select Account", list(a_opts.keys()))
+                if st.button("🗑️ Delete Selected Account", type="primary"):
+                    try:
+                        conn.execute("DELETE FROM accounts WHERE id=?", (a_opts[selected_a],))
+                        conn.commit()
+                        st.success("Deleted!")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Cannot delete: {e}")
+
     except Exception as e:
         pass
     conn.close()
@@ -221,6 +337,8 @@ with tab_tags:
                     conn.execute("INSERT INTO search_tags (tag, platform) VALUES (?, ?)", (search_tag.strip(), t_platform))
                     conn.commit()
                     st.success("Tag added successfully!")
+                    time.sleep(1)
+                    st.rerun()
                 except sqlite3.IntegrityError:
                     st.error("Tag already exists.")
                 conn.close()
@@ -230,6 +348,27 @@ with tab_tags:
         df_tags = pd.read_sql_query("SELECT id, tag, platform, status FROM search_tags", conn)
         if not df_tags.empty:
             st.dataframe(df_tags, use_container_width=True)
+            
+            st.divider()
+            st.subheader("🛠️ Action Zone (Tags)")
+            with st.expander("Modify or Delete Tag"):
+                t_opts = {f"[{row['platform']}] {row['tag']}": row['id'] for idx, row in df_tags.iterrows()}
+                selected_t = st.selectbox("Select Target Tag", list(t_opts.keys()))
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("⏸️ Deactivate Tag"):
+                        conn.execute("UPDATE search_tags SET status='inactive' WHERE id=?", (t_opts[selected_t],))
+                        conn.commit()
+                        st.success("Deactivated!")
+                        time.sleep(1)
+                        st.rerun()
+                with col2:
+                    if st.button("🗑️ Delete Selected Tag", type="primary"):
+                        conn.execute("DELETE FROM search_tags WHERE id=?", (t_opts[selected_t],))
+                        conn.commit()
+                        st.success("Deleted!")
+                        time.sleep(1)
+                        st.rerun()
         else:
             st.info("No tags configured. Add some tags for the agent to start hunting!")
     except Exception as e:
@@ -264,13 +403,16 @@ with tab_config:
     with st.form("sys_config_form"):
         niche = st.text_input("Target Niche", value=config_row["target_niche"] if config_row else "")
         link = st.text_input("Product Link (UTM)", value=config_row["product_link"] if config_row else "")
-        try:
-            api_key = st.text_input("Gemini API Key", value=config_row["gemini_api_key"] if config_row and "gemini_api_key" in config_row.keys() and config_row["gemini_api_key"] else "", type="password")
-        except:
-            api_key = st.text_input("Gemini API Key", value="", type="password")
+        
+        try: cooldown_val = int(config_row["cooldown_minutes"]) if config_row and "cooldown_minutes" in config_row.keys() and config_row["cooldown_minutes"] is not None else 90
+        except: cooldown_val = 90
+        cooldown_ui = st.number_input("Account Cooldown (Minutes)", min_value=5, max_value=1440, value=cooldown_val)
+        
+        try: api_key = st.text_input("Gemini API Key", value=config_row["gemini_api_key"] if config_row and "gemini_api_key" in config_row.keys() and config_row["gemini_api_key"] else "", type="password")
+        except: api_key = st.text_input("Gemini API Key", value="", type="password")
             
         if st.form_submit_button("Save Strategy Context"):
-            conn.execute("UPDATE system_config SET target_niche = ?, product_link = ?, gemini_api_key = ?", (niche, link, api_key))
+            conn.execute("UPDATE system_config SET target_niche = ?, product_link = ?, gemini_api_key = ?, cooldown_minutes = ?", (niche, link, api_key, cooldown_ui))
             conn.commit()
             st.success("Strategy Context Updated!")
     
@@ -283,6 +425,18 @@ with tab_override:
         st.warning("Manual Override ACTIVE. Next agent interaction will drop the link regardless of Rapport Phase.")
     else:
         st.success("Operating in Autonomous Mode.")
+        
+    st.divider()
+    st.subheader("🗑️ Data Reset")
+    st.write("Clear all mock and legacy engagements from the Mission Map and Live Feed.")
+    if st.button("Wipe Mission History Data", type="primary"):
+        conn = get_db_connection()
+        conn.execute("DELETE FROM engagements")
+        conn.commit()
+        conn.close()
+        st.success("History Reset! Refreshing...")
+        time.sleep(1)
+        st.rerun()
 
 with tab_saas:
     st.header("💼 SaaS Simulation")

@@ -70,7 +70,7 @@ def count_organic_posts(conn, account_id):
         return c.fetchone()[0]
     except: return 0
 
-def is_cooldown_ready(conn, account_id):
+def is_cooldown_ready(conn, account_id, base_cooldown):
     c = conn.cursor()
     c.execute("SELECT last_posted_at FROM accounts WHERE id=?", (account_id,))
     row = c.fetchone()
@@ -78,7 +78,6 @@ def is_cooldown_ready(conn, account_id):
         return True
     
     last_posted_at = row[0]
-    base_cooldown = 90
     variance = base_cooldown * 0.05
     actual_cooldown_mins = base_cooldown + random.uniform(-variance, variance)
     
@@ -121,7 +120,7 @@ def run_agent_daemon():
             c = db_conn.cursor()
             
             try:
-                c.execute("SELECT target_niche, product_link, agent_status, gemini_api_key FROM system_config LIMIT 1")
+                c.execute("SELECT target_niche, product_link, agent_status, gemini_api_key, cooldown_minutes FROM system_config LIMIT 1")
                 row = c.fetchone()
             except:
                 time.sleep(5)
@@ -131,7 +130,8 @@ def run_agent_daemon():
                 time.sleep(5)
                 continue
             
-            niche, product_link, agent_status, gemini_api_key = row
+            niche, product_link, agent_status, gemini_api_key, cooldown_minutes = row
+            cooldown_val = int(cooldown_minutes) if cooldown_minutes is not None else 90
             
             if agent_status == 'stopped':
                 time.sleep(5)
@@ -151,8 +151,8 @@ def run_agent_daemon():
                     account_id, username, platform, min_organic, p_prompt = acc
                     min_organic = min_organic if min_organic is not None else 3
                     
-                    if not is_cooldown_ready(db_conn, account_id):
-                        print(f"[-] Cooldown active for @{username}. Skipping to avoid pattern detection (90m rule).")
+                    if not is_cooldown_ready(db_conn, account_id, cooldown_val):
+                        print(f"[-] Cooldown active for @{username}. Skipping to avoid pattern detection ({cooldown_val}m rule).")
                         continue
                         
                     tags = fetch_search_tags(db_conn, platform)
